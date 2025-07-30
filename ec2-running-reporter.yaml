@@ -45,10 +45,14 @@ Resources:
     Properties:
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref SNSTopic
       Code:
         ZipFile: |
           import boto3
           import json
+          import os
           from datetime import datetime
           from zoneinfo import ZoneInfo
 
@@ -96,7 +100,7 @@ Resources:
               message += "주의사항: 현재 실행(Running) 중인 상태의 EC2 인스턴스 리스트입니다. 중지(Stop)와 같은 다른 상태의 인스턴스들은 포함되어 있지 않습니다."
 
               sns.publish(
-                  TopicArn='YOUR_SNS_TOPIC_ARN',
+                  TopicArn=os.environ['SNS_TOPIC_ARN'],
                   Subject=f'EC2 인스턴스 상태 보고 - 계정 {account_id}',
                   Message=message
               )
