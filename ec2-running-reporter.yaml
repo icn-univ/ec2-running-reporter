@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 Running Instance Reporter'
+
+Parameters:
+  EmailAddress:
+    Type: String
+    Description: Email address to receive EC2 instance reports
+
+Resources:
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: EC2InstanceReportTopic
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref EmailAddress
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EC2SNSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeRegions
+                  - organizations:DescribeAccount
+                  - sns:Publish                  
+                Resource: '*'
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          def lambda_handler(event, context):
+              sts = boto3.client('sts')
+              ec2 = boto3.client('ec2')
+              sns = boto3.client('sns')
+                            
+              account_id = sts.get_caller_identity()['Account']
+              
+              org = boto3.client('organizations')
+              try:
+                  account_name = org.describe_account(AccountId=account_id)['Account']['Name']
+              except:
+                  account_name = "N/A"
+              
+              regions = [region['RegionName'] for region in ec2.describe_regions()['Regions']]
+              
+              current_time = datetime.now(ZoneInfo("Asia/Seoul")).strftime('%Y-%m-%d %H:%M:%S %Z')
+              
+              message = f"AWS 계정 {account_name} ({account_id})에서 "
+              message += f"실행 중인 EC2 인스턴스 목록 ({current_time})\n\n"
+              
+              for region in regions:
+                  ec2_region = boto3.client('ec2', region_name=region)
+                  instances = ec2_region.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+                  
+                  if instances['Reservations']:
+                      message += f"리전: {region}\n"
+                      for reservation in instances['Reservations']:
+                          for instance in reservation['Instances']:
+                              instance_name = "N/A"
+                              for tag in instance.get('Tags', []):
+                                  if tag['Key'] == 'Name':
+                                      instance_name = tag['Value']
+                                      break
+                              
+                              message += f"  인스턴스 이름: {instance_name}\n"
+                              message += f"  인스턴스 ID: {instance['InstanceId']}\n"
+                              message += f"  인스턴스 타입: {instance['InstanceType']}\n"
+                              message += f"  퍼블릭 IP: {instance.get('PublicIpAddress', 'N/A')}\n\n"
+                      
+                      message += "\n"
+              
+              message += "주의사항: 현재 실행(Running) 중인 상태의 EC2 인스턴스 리스트입니다. 중지(Stop)와 같은 다른 상태의 인스턴스들은 포함되어 있지 않습니다."
+
+              sns.publish(
+                  TopicArn='YOUR_SNS_TOPIC_ARN',
+                  Subject=f'EC2 인스턴스 상태 보고 - 계정 {account_id}',
+                  Message=message
+              )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('이메일 발송 완료')
+              }
+      Runtime: python3.12
+      Timeout: 300
+      MemorySize: 256
+
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "ScheduledRule"
+      ScheduleExpression: "cron(0 22 * * ? *)"
+      State: "ENABLED"
+      Targets: 
+        - Arn: !GetAtt LambdaFunction.Arn
+          Id: "TargetFunctionV1"
+
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref LambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt ScheduledRule.Arn
+
+Outputs:
+  LambdaFunctionArn:
+    Description: "Lambda Function ARN"
+    Value: !GetAtt LambdaFunction.Arn
+  SNSTopicArn:
+    Description: "SNS Topic ARN"
+    Value: !Ref SNSTopic
